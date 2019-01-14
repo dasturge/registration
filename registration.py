@@ -1,7 +1,8 @@
 import tensorflow as tf
 
 
-def register(moving, reference, cost_fn=tf.losses.mean_squared_error,
+def register(moving, reference, movmat=tf.eye(4), refmat=tf.eye(4),
+             cost_fn=tf.losses.mean_squared_error,
              optimizer=tf.train.AdamOptimizer(), **kwargs):
     """
     take two images and compute a registration between them
@@ -10,43 +11,64 @@ def register(moving, reference, cost_fn=tf.losses.mean_squared_error,
     :param verbose:
     :return:
     """
-    # maybe load data, and convert to tensors
+    # compute difference
+    m2r_affine = refmat @ tf.linalg.inv(movmat)
 
     # create a meshgrid for each (should be in millimeters or ratio to reference size...)
-    Xijk = tf.stack(tf.meshgrid())
-    Yijk = tf.stack(tf.meshgrid())
+    xdim = reference.shape
+    ydim = moving.shape
+
+    Xijk = tf.stack(tf.meshgrid(
+        tf.range(xdim[0]), tf.range(xdim[1]), tf.range(xdim[2])
+    ))
+    Yijk = tf.stack(tf.meshgrid(
+        tf.range(ydim[0]), tf.range(ydim[1]), tf.range(ydim[2])
+    ))
 
     # extract reference shape data
     Xdims = tf.shape(Xijk)[1:]
     Xnpoints = tf.reduce_prod(Xdims)
-    Xijk_flat = tf.reshape(Xijk, [1, 4, Xnpoints])
-    Xijk_flat = tf.transpose(Xijk_flat, [0, 2, 1])
-
     Ydims = tf.shape(Yijk)[1:]
     Ynpoints = tf.reduce_prod(Ydims)
 
-    ## get boundaries for Xijk image
+    # flatten coordinates
+    ones = tf.ones(shape=[1, 1, Xnpoints], dtype=tf.int32)
+    Xijk = tf.reshape(Xijk, [1, 3, Xnpoints])
+    Xijk = tf.concat((Xijk, ones), axis=1)
+    Xijk = tf.transpose(Xijk, [0, 2, 1])
+
+    ones = tf.ones(shape=[1, 1, Ynpoints], dtype=tf.int32)
+    Yijk = tf.reshape(Yijk, [1, 3, Ynpoints])
+    Yijk = tf.concat((Yijk, ones), axis=1)
+    Yijk = tf.transpose(Yijk, [0, 2, 1])
+
+    Xijk = tf.cast(Xijk, tf.float64)
+    Yijk = tf.cast(Yijk, tf.float64)
+
+    moving = tf.reshape(moving, [1, Ynpoints, 1])
 
     # initialize a transformation
     # define free parameters (6 dof or 12 dof)
-    theta1= tf.Variable()
-    theta2= tf.Variable()
-    xfm = tf.eye(4)
+    xfm = translation_matrix()
 
-    # compute transformation on indices
-    Yijk_new = tf.einsum('ij,jxyz->ixyz', xfm, Yijk)
+    # compute linear transformation on indices
+    Yijk_transformed = tf.einsum('ij,abj->abi', xfm, Yijk)
 
     # calculate cost function
     # this will probably be fairly slow by comparison
-    Yijk_flat = tf.reshape(Yijk_new, [1, 4, Ynpoints])
-    Yijk_flat = tf.transpose(Yijk_flat, [0, 2, 1])
-    Yval = tf.contrib.image.interpolate_spline(Yijk_flat, moving, Xijk_flat,
+    Yval = tf.contrib.image.interpolate_spline(Yijk_transformed, moving, Xijk,
                                                order=1)
+    # it does not work :( I think it is attempting to compute output using ALL
+    # training points.
+
+    Yval = tf.reshape(Yval, xdim)
     ## cost
     loss = cost_fn(reference, Yval)
 
     # optimizer
-    optimizer.minimize(loss)
+    graph = optimizer.minimize(loss)
+
+    return graph
 
 
 def nonlinear_register(moving, reference, **kwargs):
@@ -54,21 +76,22 @@ def nonlinear_register(moving, reference, **kwargs):
 
 
 def rotation_matrix():
-    thetax = tf.get_variable()
-    thetay = tf.get_variable()
-    thetaz = tf.get_variable()
-
-
+    quaternion = tf.get_variable(name='rotation_params', shape=(4,),
+                                 initializer=tf.initializers.random_normal,
+                                 constraint=tf.linalg.l2_normalize,
+                                 dtype=tf.float64)
 
 
 def translation_matrix():
-    params = tf.get_variable(name='params',
-                             initializer=tf.initializers.random_normal)
-    one = tf.constant((1,))
-    col = tf.stack((params, one))
-    mat = tf.concat((tf.eye(4, 3), col), axis=1)
+    params = tf.get_variable(name='params', shape=(3,),
+                             initializer=tf.initializers.random_normal,
+                             dtype=tf.float64)
+    one = tf.constant((1,), dtype=tf.float64)
+    col = tf.expand_dims(tf.concat((params, one), axis=0), 1)
+    mat = tf.concat((tf.eye(4, 3, dtype=tf.float64), col), axis=1)
 
     return mat
+
 
 def scaling_matrix():
     pass
